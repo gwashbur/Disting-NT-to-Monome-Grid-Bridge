@@ -5,6 +5,9 @@ Monome Grid Bridge: bridges a Monome grid to Expert Sleepers Disting NT via MIDI
 - Grid key presses are sent to the NT as MIDI notes (index = note number).
 - Incoming MIDI from the NT (cursor CC, enabled/playhead note velocities) drives
   grid LED state. Uses pymonome for grid I/O and mido for MIDI.
+
+Requires serialosc to be running (see https://monome.org/docs/serialosc). Grid size
+is assumed 16×8 (128 keys); other sizes would need different GRID_W/GRID_H.
 """
 import asyncio
 import time
@@ -19,6 +22,7 @@ import mido
 # Configuration
 # -----------------------------------------------------------------------------
 
+# Grid dimensions (must match your device; serialosc reports /sys/size as rows cols, e.g. 8 16).
 GRID_W = 16
 GRID_H = 8
 
@@ -34,7 +38,8 @@ VEL_ENABLED = 20     # Note On velocity 20 = step enabled (note = index)
 VEL_PLAYHEAD = 100   # Note On velocity 100 = playhead at index (note = index)
 # Note On velocity 0 = step disabled (or use Note Off).
 
-# Grid LED brightness levels (0–15).
+# Grid LED brightness levels. Serialosc variable brightness is 0–15; devices from
+# June 2012+ support all 16 levels; older grids may quantize to 4 levels (see serialosc OSC docs).
 BR_OFF = 0
 BR_EXIST = 3         # Reserved; unused in current logic
 BR_ENABLED = 6
@@ -222,6 +227,7 @@ class GridBridge(monome.GridApp):
     """
     Monome grid app: key events are sent to the NT as MIDI notes.
     LED state is driven by a separate render loop using GridState (not key handlers).
+    Key events follow serialosc /grid/key: (x, y, s) with s=1 down, s=0 up.
     """
     def __init__(self, midi: MidiToNt):
         super().__init__()
@@ -230,6 +236,7 @@ class GridBridge(monome.GridApp):
         self.buffer = monome.GridBuffer(GRID_W, GRID_H)
 
     async def connect_grid(self, host: str, port: int):
+        """Connect to the grid via serialosc device port (serialosc spawns one port per device)."""
         await self.grid.connect(host, port)
         self.connected = True
         print("[GRID] Connected to device port:", port)
@@ -271,7 +278,7 @@ async def render_loop(app: GridBridge, state: GridState):
 
         if app.connected and state.dirty:
             frame = state.compose_levels()
-
+            # Serialosc: /grid/led/level/set x y l with l in [0, 15]; GridBuffer sends level per cell.
             for y in range(GRID_H):
                 for x in range(GRID_W):
                     app.buffer.led_level_set(x, y, frame[y][x])
@@ -316,7 +323,7 @@ async def main():
     await midi.connect()
 
     app = GridBridge(midi)
-    serialosc = monome.SerialOsc()
+    serialosc = monome.SerialOsc()  # Discovery: serialosc server port 12002; /serialosc/list, /serialosc/notify
 
     def on_device_added(dev_id, dev_type, dev_port):
         print(f"[GRID] Discovered id={dev_id} type={dev_type} port={dev_port}")
