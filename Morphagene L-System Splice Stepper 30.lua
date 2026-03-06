@@ -33,7 +33,7 @@ local STATE_SELECTED   = 3
 local STATE_PLAYHEAD   = 4
 local STATE_TRIGGERED  = 5
 
--- USB MIDI destination bitmask for sendMIDI()
+-- USB MIDI destination for sendMIDI(where, ...). Manual: 0x4 = USB MIDI.
 local MIDI_DEST_USB = 0x4
 
 local mg = {
@@ -121,6 +121,9 @@ local function spliceIndexToVoltage(i)
 end
 
 -- MIDI helpers
+-- Disting NT Lua: sendMIDI(where, byte1, byte2, byte3). where: 0x4 = USB.
+-- Status byte = base + (channel - 1); channel from parameters[4] is 1-16.
+-- Note On base 0x90, Note Off 0x80, Control Change 0xB0.
 
 local function midiStatus(base, ch1to16)
     local ch = clamp(ch1to16 or 1, 1, 16) - 1
