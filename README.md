@@ -65,7 +65,7 @@ NoteOn vel=20	Enabled step
 NoteOn vel=0	Disabled step
 NoteOn vel=100	Playhead
 
-**Compatible NT algorithm:** The Lua script `-- Morphagene L-System Splice Stepper 30.lua` is designed to work with this bridge. Load it on the Disting NT; it uses the same semantic protocol above (CC10 cursor, vel 20/0/100 for enabled/disabled/playhead) and treats the grid as a 16×8 page window over up to 300 Morphagene splices.
+**Compatible NT algorithm:** The Lua script `Morphagene L-System Splice Stepper 30.lua` is designed to work with this bridge. Load it on the Disting NT; it uses the same semantic protocol above (CC10 cursor, vel 20/0/100 for enabled/disabled/playhead) and treats the grid as a 16×8 page window over up to 300 Morphagene splices.
 
 This avoids SysEx and keeps bandwidth low while preserving state meaning.
 

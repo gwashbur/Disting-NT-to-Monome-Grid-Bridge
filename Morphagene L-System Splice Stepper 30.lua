@@ -3,24 +3,19 @@
 --   - cleaner state model
 --   - semantic UI rendering
 --   - USB MIDI semantic mirroring for Raspberry Pi / monome Grid
---
 -- Compatible with Monome Grid Bridge (Disting NT ↔ Grid). Grid key presses
 -- are sent to the NT as MIDI notes; this script toggles steps on Note On.
 -- See Disting NT User Manual & Lua Scripting docs (Expert Sleepers).
---
 -- OUT1: Morphagene ORGANIZE CV (0..5V, bin-centered for N splices)
 -- OUT2: 5V pulse to Morphagene PLAY
---
 -- MIDI semantic mirror (USB):
 --   CC10 = cursor index on current page (0..127)
 --   CC11 = current page (1-based)
 --   Note On note=<page-local index>, vel=20   -> enabled
 --   Note On note=<page-local index>, vel=0    -> disabled
 --   Note On note=<page-local index>, vel=100  -> playhead
---
 -- Incoming MIDI (from Grid via bridge): Note On note=page-local index, vel=127
 --   toggles the step at that index on the current page.
---
 -- Grid/Pi side should treat the current page as a 16x8 local window.
 
 local MAX_SPLICES   = 300
@@ -69,9 +64,7 @@ for i = 1, MAX_SPLICES do
     mg.cellState[i] = STATE_EMPTY
 end
 
-----------------------------------------------------------------------
 -- Utility
-----------------------------------------------------------------------
 
 local function clamp(x, lo, hi)
     if x < lo then return lo end
@@ -127,9 +120,7 @@ local function spliceIndexToVoltage(i)
     return clamp(v, 0.0, 5.0)
 end
 
-----------------------------------------------------------------------
 -- MIDI helpers
-----------------------------------------------------------------------
 
 local function midiStatus(base, ch1to16)
     local ch = clamp(ch1to16 or 1, 1, 16) - 1
@@ -204,9 +195,7 @@ local function sendFullPageState(self)
     mg.needsMidiFullSync = false
 end
 
-----------------------------------------------------------------------
 -- Enabled list + cursor/playhead helpers
-----------------------------------------------------------------------
 
 local function rebuildEnabledList()
     mg.enabledCount = 0
@@ -266,9 +255,7 @@ local function startFromCursorIfEnabled()
     return true
 end
 
-----------------------------------------------------------------------
 -- L-system-like weighted motion
-----------------------------------------------------------------------
 
 local STEP_WEIGHTS = {
     [-2] = 1,
@@ -299,9 +286,7 @@ local function nextMove()
     return weightedChoice(STEP_WEIGHTS)
 end
 
-----------------------------------------------------------------------
 -- Semantic UI state
-----------------------------------------------------------------------
 
 local function clearCellStates()
     for i = 1, mg.nSplices do
@@ -371,9 +356,7 @@ local function renderCellState(state, x1, y1, x2, y2)
     end
 end
 
-----------------------------------------------------------------------
 -- Main algorithm
-----------------------------------------------------------------------
 
 return {
     name   = "MG L-System Splice Stepper 300",
@@ -504,9 +487,7 @@ return {
         return OUTPUT_BUFFER
     end,
 
-    ------------------------------------------------------------------
     -- UI editing
-    ------------------------------------------------------------------
 
     encoder1Turn = function(self, dir)
         recomputeAndClampParams(self)
@@ -590,9 +571,7 @@ return {
         mg.needsMidiFullSync = true
     end,
 
-    ------------------------------------------------------------------
     -- Draw
-    ------------------------------------------------------------------
 
     draw = function(self)
         recomputeAndClampParams(self)
