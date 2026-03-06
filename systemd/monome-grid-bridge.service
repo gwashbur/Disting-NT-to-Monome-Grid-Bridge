@@ -1,0 +1,17 @@
+[Unit]
+Description=Monome Grid Bridge (Disting NT ↔ Grid)
+After=network.target serialoscd.service
+Requires=serialoscd.service
+
+[Service]
+Type=simple
+User=admin
+WorkingDirectory=/home/admin/Disting-NT-to-Monome-Grid-Bridge
+# Short delay so serialosc is listening before bridge connects
+ExecStartPre=/bin/sleep 2
+ExecStart=/home/admin/Disting-NT-to-Monome-Grid-Bridge/.venv/bin/python3 "/home/admin/Disting-NT-to-Monome-Grid-Bridge/Monome Grid Bridge.py"
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

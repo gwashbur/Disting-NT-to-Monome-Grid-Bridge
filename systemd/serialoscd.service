@@ -1,0 +1,19 @@
+[Unit]
+Description=Monome serialosc daemon (grid/arc OSC server)
+After=network.target
+# Allow USB to be ready
+After=systemd-udev-settle.service
+
+[Service]
+Type=simple
+User=admin
+# Required so serialoscd can use ~/.config/serialosc
+Environment="HOME=/home/admin"
+ExecStart=/usr/local/bin/serialoscd
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
