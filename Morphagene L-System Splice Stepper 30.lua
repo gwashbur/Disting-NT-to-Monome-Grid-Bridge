@@ -11,6 +11,7 @@
 -- MIDI semantic mirror (USB):
 --   CC10 = cursor index on current page (0..127)
 --   CC11 = current page (1-based)
+--   CC12 value 0 = clear playhead (when sequencer stopped; avoids stuck box 00)
 --   Note On note=<page-local index>, vel=20   -> enabled
 --   Note On note=<page-local index>, vel=0    -> disabled
 --   Note On note=<page-local index>, vel=100  -> playhead
@@ -110,7 +111,9 @@ local function pageLocalToAbs(localIndex)
     return s + localIndex
 end
 
--- Splice i -> center-of-bin voltage across 0..5V
+-- Splice index → ORGANIZE CV (0–5 V). Morphagene expects 0–5 V; each splice is one bin.
+-- Center-of-bin: splice i (1..N) → voltage = (i - 0.5) * (5/N) so Morphagene reliably selects that splice.
+-- Example: N=20 → bin=0.25 V; splice 1→0.125 V, splice 10→2.375 V, splice 20→4.875 V.
 local function spliceIndexToVoltage(i)
     local N = mg.nSplices
     if N <= 0 then return 0.0 end
@@ -179,6 +182,12 @@ local function sendPlayhead(self, absIndex)
     sendNoteOn(ch, note, 100)     -- semantic: playhead
 end
 
+-- Tell grid bridge to clear playhead overlay (when sequencer is stopped).
+local function sendPlayheadClear(self)
+    local ch = midiChannel(self)
+    sendCC(ch, 12, 0)
+end
+
 local function sendFullPageState(self)
     sendPage(self)
     sendCursor(self)
@@ -193,6 +202,8 @@ local function sendFullPageState(self)
         if playSplice then
             sendPlayhead(self, playSplice)
         end
+    else
+        sendPlayheadClear(self)
     end
 
     mg.needsMidiFullSync = false

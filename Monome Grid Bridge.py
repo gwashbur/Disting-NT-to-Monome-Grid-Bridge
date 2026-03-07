@@ -29,11 +29,12 @@ GRID_H = 8
 # MIDI port name substrings used to find the Disting NT (adjust if your device name differs).
 NT_PORT_MATCH = ["disting", "expert", "sleepers", "nt"]
 
-# MIDI channel used for NT (1–16 in UI; stored and sent as 0–15 in bytes).
+# MIDI channel for NT (1–16). Must match the Lua script "MIDI ch" parameter on the Disting NT.
 NT_MIDI_CH_1TO16 = 1
 
 # Semantic protocol: incoming MIDI from NT → this script.
 CC_CURSOR = 10       # CC #10 value = cursor index 0..127
+CC_PLAYHEAD_CLEAR = 12  # CC #12 value 0 = clear playhead (when NT sequencer is stopped)
 VEL_ENABLED = 20     # Note On velocity 20 = step enabled (note = index)
 VEL_PLAYHEAD = 100   # Note On velocity 100 = playhead at index (note = index)
 # Note On velocity 0 = step disabled (or use Note Off).
@@ -295,10 +296,12 @@ async def midi_rx_loop(midi: MidiToNt, state: GridState):
     while True:
         msg = await midi.rx_queue.get()
 
-        # Protocol: CC10 = cursor index; Note On vel 20 = enabled, vel 100 = playhead, vel 0 = disabled
+        # Protocol: CC10 = cursor index; CC12 value 0 = clear playhead; Note On vel 20 = enabled, vel 100 = playhead, vel 0 = disabled
         if msg.type == "control_change":
             if msg.control == CC_CURSOR:
                 state.set_cursor(msg.value)
+            elif msg.control == CC_PLAYHEAD_CLEAR and msg.value == 0:
+                state.set_playhead(None)
 
         elif msg.type == "note_on":
             idx = msg.note
