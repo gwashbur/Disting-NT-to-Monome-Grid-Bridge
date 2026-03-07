@@ -431,6 +431,7 @@ return {
         end
 
         if mg.pos == 0 then
+            -- Start from cursor: first splice when play goes 0→1 is the splice under the cursor (if it's enabled).
             local ok = startFromCursorIfEnabled()
             if not ok then return end
 
@@ -631,12 +632,6 @@ return {
             if absIndex <= e then
                 local state = mg.cellState[absIndex]
                 renderCellState(state, x1, y1, x2, y2)
-
-                -- 2-digit local label where practical
-                -- page-local labels fit the box better than absolute splice numbers
-                if localIdx <= 99 then
-                    drawTinyText(x1 + 2, y1 + 1, string.format("%02d", localIdx), 15)
-                end
             end
         end
     end
