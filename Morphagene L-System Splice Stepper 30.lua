@@ -1,4 +1,3 @@
--- Morphagene L-System Splice Stepper 300
 -- Rewritten for:
 --   - cleaner state model
 --   - semantic UI rendering
@@ -19,7 +18,8 @@
 --   toggles the step at that index on the current page.
 -- Grid/Pi side should treat the current page as a 16x8 local window.
 
-local MAX_SPLICES   = 300
+-- Fixed maximum number of splices. All indexing and iteration must respect 1..96.
+local MAX_SPLICES   = 96
 local PAGE_CAPACITY = 128
 local GRID_COLS     = 16
 local GRID_ROWS     = 8
@@ -255,18 +255,52 @@ local function moveCursorToPageStart()
     mg.cursorIndex = clamp(s, 1, mg.nSplices)
 end
 
-local function startFromCursorIfEnabled()
+-- When (re)starting the sequencer from a stopped state, always begin from the
+-- lowest-numbered active splice (splice 1 if active, otherwise 2, 3, ...).
+-- Returns true if a valid starting splice was found, false if there are none.
+local function startFromFirstActive()
     rebuildEnabledList()
-    local p = findCursorPosInEnabled()
-    if p == 0 then
+    if mg.enabledCount <= 0 then
         mg.pos = 0
+        mg.cachedCV = 0.0
         return false
     end
 
-    mg.pos = p
+    mg.pos = 1
     local spliceIndex = mg.enabled[mg.pos]
     mg.cachedCV = spliceIndexToVoltage(spliceIndex)
     return true
+end
+
+-- After any change to mg.active (enabling/disabling splices), ensure that:
+-- - the enabled list is up to date,
+-- - the sequencer is stopped if there are no active splices,
+-- - otherwise the playhead points at a valid active splice (the first active),
+-- - ORGANIZE CV and grid state will be refreshed on the next draw.
+local function ensureValidPlayhead(self)
+    rebuildEnabledList()
+
+    if mg.enabledCount <= 0 then
+        mg.pos = 0
+        mg.cachedCV = 0.0
+        -- Explicitly clear playhead overlay on the grid when nothing is active.
+        sendPlayheadClear(self)
+        mg.needsMidiFullSync = true
+        return
+    end
+
+    local currentSplice = nil
+    if mg.pos ~= 0 and mg.enabledCount > 0 and mg.enabled[mg.pos] then
+        currentSplice = mg.enabled[mg.pos]
+    end
+
+    if mg.pos == 0 or not currentSplice or not mg.active[currentSplice] then
+        mg.pos = 1
+        currentSplice = mg.enabled[1]
+    end
+
+    mg.cachedCV = spliceIndexToVoltage(currentSplice)
+    mg.needsMidiFullSync = true
 end
 
 -- L-system-like weighted motion
@@ -427,21 +461,24 @@ return {
         rebuildEnabledList()
 
         if mg.enabledCount <= 0 then
+            -- No active splices at all: stop and clear playhead.
+            sendPlayheadClear(self)
             return
         end
 
         if mg.pos == 0 then
-            -- Start from cursor: first splice when play goes 0→1 is the splice under the cursor (if it's enabled).
-            local ok = startFromCursorIfEnabled()
-            if not ok then return end
+            -- First step after stop: start from the lowest-numbered active splice.
+            local ok = startFromFirstActive()
+            if not ok then
+                sendPlayheadClear(self)
+                return
+            end
 
             mg.pulseRemaining = clamp(self.parameters[2], 1, 1000) / 1000.0
             mg.triggerFlash = 0.08
 
-            if mg.enabledCount > 0 then
-                local playSplice = mg.enabled[mg.pos]
-                sendPlayhead(self, playSplice)
-            end
+            local playSplice = mg.enabled[mg.pos]
+            sendPlayhead(self, playSplice)
             return
         end
 
@@ -472,8 +509,9 @@ return {
             return
         end
         mg.active[absIndex] = not mg.active[absIndex]
-        mg.pos = 0
         sendEnableStateForAbs(self, absIndex)
+        -- Any grid edit must immediately reflect in enabled list and playhead.
+        ensureValidPlayhead(self)
     end,
 
     step = function(self, dt, inputs)
@@ -544,11 +582,9 @@ return {
             mg.cursorIndex = mg.nSplices
         end
 
-        if mg.pos ~= 0 then
-            mg.pos = 0
-        end
-
-        mg.needsMidiFullSync = true
+        -- Changing the total number of splices should rebuild the enabled list
+        -- and keep the playhead on a valid active splice (or stop if none).
+        ensureValidPlayhead(self)
     end,
 
     button1Push = function(self)
@@ -556,9 +592,9 @@ return {
 
         local i = clamp(mg.cursorIndex, 1, mg.nSplices)
         mg.active[i] = not mg.active[i]
-        mg.pos = 0
-
         sendEnableStateForAbs(self, i)
+        -- Button edits share the same rules as grid edits.
+        ensureValidPlayhead(self)
     end,
 
     button2Push = function(self)
@@ -567,8 +603,8 @@ return {
         for i = 1, mg.nSplices do
             mg.active[i] = false
         end
-        mg.pos = 0
-        mg.needsMidiFullSync = true
+        -- All off → sequencer off and playhead cleared.
+        ensureValidPlayhead(self)
     end,
 
     button3Push = function(self)
@@ -577,8 +613,8 @@ return {
         for i = 1, mg.nSplices do
             mg.active[i] = true
         end
-        mg.pos = 0
-        mg.needsMidiFullSync = true
+        -- All on → start from the first splice on next trigger.
+        ensureValidPlayhead(self)
     end,
 
     button4Push = function(self)
