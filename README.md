@@ -86,6 +86,7 @@ NT → Grid (from Lua on the Disting NT, consumed by the Pi)
 | CC10 value = 0–127   | Cursor index (page-local)         |
 | CC11 value = 1–127   | Current page index (1-based)      |
 | CC12 value = 0       | Clear playhead overlay            |
+| CC13 value = 1–96    | Splice count (number of dim LEDs) |
 | Note On vel = 20     | Enabled step at index (note)      |
 | Note On vel = 0      | Disabled step at index (note)     |
 | Note On vel = 100    | Playhead at index (note)          |
@@ -266,16 +267,17 @@ Index mapping is 1:1 across the system:
 Brightness semantics (Grid 0–15)
 --------------------------------
 
-| Level | Meaning  |
-|-------|----------|
-| 0     | Off      |
-| 6     | Enabled  |
-| 12    | Cursor   |
-| 15    | Playhead |
+| Level | Meaning                          |
+|-------|----------------------------------|
+| 0     | Off (beyond splice count)        |
+| 4     | Dim (within splice count)       |
+| 12    | Cursor                           |
+| 15    | Playhead (bright or blinking)     |
 
-Overlay priority:
-
-`Playhead > Cursor > Enabled > Off`
+Splice count (CC13) and page (CC11) from the NT define how many LEDs are dim:
+exactly that many positions on the current page are lit dim; the currently
+playing splice is highlighted (bright or blinking). Overlay priority:
+`Playhead > Cursor > Dim (splice count) > Off`.
 
 Extending the system
 --------------------

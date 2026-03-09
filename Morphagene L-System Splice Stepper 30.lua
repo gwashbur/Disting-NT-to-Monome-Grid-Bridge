@@ -11,6 +11,7 @@
 --   CC10 = cursor index on current page (0..127)
 --   CC11 = current page (1-based)
 --   CC12 value 0 = clear playhead (when sequencer stopped; avoids stuck box 00)
+--   CC13 = splice count (1..96); grid shows this many dim LEDs
 --   Note On note=<page-local index>, vel=20   -> enabled
 --   Note On note=<page-local index>, vel=0    -> disabled
 --   Note On note=<page-local index>, vel=100  -> playhead
@@ -26,13 +27,15 @@ local GRID_ROWS     = 8
 
 local OUTPUT_BUFFER = {0.0, 0.0}
 
--- Semantic UI states
-local STATE_EMPTY      = 0
-local STATE_EXIST      = 1
-local STATE_ENABLED    = 2
-local STATE_SELECTED   = 3
-local STATE_PLAYHEAD   = 4
-local STATE_TRIGGERED  = 5
+-- Semantic UI states. These are used only for drawing; they do not affect
+-- the underlying splice enable/disable logic.
+local STATE_EMPTY        = 0
+local STATE_EXIST        = 1
+local STATE_ENABLED      = 2
+local STATE_SELECTED_ON  = 3   -- cursor at an enabled splice
+local STATE_SELECTED_OFF = 4   -- cursor at a disabled splice
+local STATE_PLAYHEAD     = 5
+local STATE_TRIGGERED    = 6
 
 -- USB MIDI destination for sendMIDI(where, ...). Manual: 0x4 = USB MIDI.
 local MIDI_DEST_USB = 0x4
@@ -188,8 +191,15 @@ local function sendPlayheadClear(self)
     sendCC(ch, 12, 0)
 end
 
+-- Tell grid bridge how many splices exist so it can show that many dim LEDs (CC13).
+local function sendSpliceCount(self)
+    local ch = midiChannel(self)
+    sendCC(ch, 13, clamp(mg.nSplices, 1, 127))
+end
+
 local function sendFullPageState(self)
     sendPage(self)
+    sendSpliceCount(self)
     sendCursor(self)
 
     local s, e = currentPageRange()
@@ -355,9 +365,17 @@ local function updateCellStates()
         end
     end
 
-    -- Cursor
+    -- Cursor overlay.
+    -- The cursor should NOT falsely imply that a splice is enabled. To make the
+    -- distinction clear we use two different visual states:
+    --   - STATE_SELECTED_ON:  cursor on an enabled splice,
+    --   - STATE_SELECTED_OFF: cursor on a disabled splice.
     if mg.cursorIndex >= 1 and mg.cursorIndex <= mg.nSplices then
-        mg.cellState[mg.cursorIndex] = STATE_SELECTED
+        if mg.active[mg.cursorIndex] then
+            mg.cellState[mg.cursorIndex] = STATE_SELECTED_ON
+        else
+            mg.cellState[mg.cursorIndex] = STATE_SELECTED_OFF
+        end
     end
 
     -- Playhead
@@ -389,8 +407,17 @@ local function renderCellState(state, x1, y1, x2, y2)
         drawBox(x1, y1, x2, y2, 5)
         drawRectangle(x1 + 1, y1 + 1, x2 - 1, y2 - 1, 6)
 
-    elseif state == STATE_SELECTED then
-        drawBox(x1, y1, x2, y2, 6)
+    elseif state == STATE_SELECTED_OFF then
+        -- Disabled splice under the cursor: show only a bright border so it is
+        -- clearly "selected but off".
+        drawBox(x1, y1, x2, y2, 4)
+        drawBox(x1 - 1, y1 - 1, x2 + 1, y2 + 1, 15)
+
+    elseif state == STATE_SELECTED_ON then
+        -- Enabled splice under the cursor: render as enabled plus a bright
+        -- selection border so it reads as both "on" and "selected".
+        drawBox(x1, y1, x2, y2, 5)
+        drawRectangle(x1 + 1, y1 + 1, x2 - 1, y2 - 1, 6)
         drawBox(x1 - 1, y1 - 1, x2 + 1, y2 + 1, 15)
 
     elseif state == STATE_PLAYHEAD then
@@ -585,6 +612,8 @@ return {
         -- Changing the total number of splices should rebuild the enabled list
         -- and keep the playhead on a valid active splice (or stop if none).
         ensureValidPlayhead(self)
+        -- So the grid shows the correct number of dim LEDs, send splice count.
+        sendSpliceCount(self)
     end,
 
     button1Push = function(self)

@@ -24,7 +24,9 @@ Data flow
 - NT → Grid:
     - The Lua script on the NT sends semantic MIDI back to the Pi:
         - CC10: current cursor index (page-local 0–127),
+        - CC11: current page (1-based),
         - CC12: value 0 means "clear playhead overlay",
+        - CC13: total splice count (1–96); number of dim LEDs on the grid,
         - Note On, vel=20: splice/step enabled at index,
         - Note On, vel=0: splice/step disabled at index,
         - Note On, vel=100: playhead at index.
@@ -66,7 +68,9 @@ NT_MIDI_CH_1TO16 = 1
 
 # Semantic protocol: incoming MIDI from NT → this script.
 CC_CURSOR = 10       # CC #10 value = cursor index 0..127
+CC_PAGE = 11         # CC #11 value = current page (1-based)
 CC_PLAYHEAD_CLEAR = 12  # CC #12 value 0 = clear playhead (when NT sequencer is stopped)
+CC_SPLICE_COUNT = 13    # CC #13 value = total splice count (1..96); drives how many grid LEDs are dim
 VEL_ENABLED = 20     # Note On velocity 20 = step enabled (note = index)
 VEL_PLAYHEAD = 100   # Note On velocity 100 = playhead at index (note = index)
 # Note On velocity 0 = step disabled (or use Note Off).
@@ -74,6 +78,7 @@ VEL_PLAYHEAD = 100   # Note On velocity 100 = playhead at index (note = index)
 # Grid LED brightness levels. Serialosc variable brightness is 0–15; devices from
 # June 2012+ support all 16 levels; older grids may quantize to 4 levels (see serialosc OSC docs).
 BR_OFF = 0
+BR_DIM = 4          # Within splice count (available splice); number of dim LEDs = splice count
 BR_EXIST = 3         # Reserved; unused in current logic
 BR_ENABLED = 6
 BR_CURSOR = 12
@@ -113,21 +118,40 @@ class GridState:
     """
     Mutable framebuffer state for the Grid.
 
-    This class tracks three conceptual layers:
-      - enabled:   which linear indices 0..127 are enabled by the NT,
-      - cursor:    which index the NT considers "selected",
-      - playhead:  which index the NT is currently playing.
+    Tracks:
+      - splice_count: total number of splices (1..96) from NT; drives how many
+        grid LEDs are shown as dim (splice count → dim LED state).
+      - page: current page (1-based) from NT; with splice_count defines which
+        grid indices are "in range" on the current page.
+      - enabled: which linear indices 0..127 are enabled (legacy; dim region
+        is now driven by splice_count + page).
+      - cursor: which index the NT considers "selected".
+      - playhead: which index the NT is currently playing (bright or blinking).
 
-    The Lua script on the NT never talks about (x, y) coordinates directly;
-    it only sends MIDI notes/CCs with an index 0..127. GridState translates
-    those linear indices into 2D coordinates, composes priorities
-    (playhead > cursor > enabled > off), and produces a 16×8 matrix of
-    brightness levels that can be flushed to the physical Grid.
+    Grid positions map to splice indices: for page P, grid index i (0..127)
+    corresponds to absolute splice index (P-1)*128 + i + 1 (1-based). Only
+    indices 1..splice_count are shown as dim; the rest are off. Playhead
+    overlay is drawn on top (bright/blinking).
     """
     def __init__(self):
         self.enabled = [False] * 128
         self.overlays = Overlays()
+        # Splice count and page from NT (CC13, CC11). Drive how many LEDs are dim.
+        self.splice_count = 16
+        self.page = 1
         self.dirty = True
+
+    def set_splice_count(self, n: int):
+        n = clamp(n, 1, 127)
+        if self.splice_count != n:
+            self.splice_count = n
+            self.dirty = True
+
+    def set_page(self, p: int):
+        p = clamp(p, 1, 127)
+        if self.page != p:
+            self.page = p
+            self.dirty = True
 
     def set_enabled(self, idx: int, is_on: bool):
         idx = clamp(idx, 0, 127)
@@ -150,24 +174,39 @@ class GridState:
             self.dirty = True
 
     def compose_levels(self) -> List[List[int]]:
-        """Build a 16×8 brightness frame (0–15) from enabled steps and overlays."""
+        """
+        Build a 16×8 brightness frame (0–15) from splice count, page, and overlays.
+
+        Mapping rules (must match NT Lua script and user requirements):
+          - Splice exists / within current splice count → LED dim (BR_DIM).
+          - Currently playing splice → LED bright or blinking (BR_PLAYHEAD).
+          - Splice beyond splice count or off-page → LED off (BR_OFF).
+
+        Grid index to absolute splice (1-based): abs_idx = (page - 1) * 128 + idx + 1.
+        We iterate over every grid cell (x, y) → linear idx = y*16 + x; if
+        1 <= abs_idx <= splice_count, cell is in range and gets BR_DIM. Then
+        playhead overlay is applied (bright/blink), then cursor overlay.
+        """
         frame = [[BR_OFF for _ in range(GRID_W)] for _ in range(GRID_H)]
+        page_base = (self.page - 1) * 128
 
-        for idx, on in enumerate(self.enabled):
-            if on:
-                x, y = idx_to_xy(idx)
-                frame[y][x] = BR_ENABLED
-
-        if self.overlays.cursor_idx is not None:
-            x, y = idx_to_xy(self.overlays.cursor_idx)
-            frame[y][x] = max(frame[y][x], BR_CURSOR)
+        for y in range(GRID_H):
+            for x in range(GRID_W):
+                idx = xy_to_idx(x, y)
+                abs_1based = page_base + idx + 1
+                if 1 <= abs_1based <= self.splice_count:
+                    frame[y][x] = BR_DIM
 
         if self.overlays.playhead_idx is not None:
             x, y = idx_to_xy(self.overlays.playhead_idx)
             if self.overlays.playhead_flash:
                 frame[y][x] = max(frame[y][x], BR_PLAYHEAD)
             else:
-                frame[y][x] = max(frame[y][x], BR_ENABLED)
+                frame[y][x] = max(frame[y][x], BR_DIM)
+
+        if self.overlays.cursor_idx is not None:
+            x, y = idx_to_xy(self.overlays.cursor_idx)
+            frame[y][x] = max(frame[y][x], BR_CURSOR)
 
         return frame
 
@@ -374,7 +413,9 @@ async def midi_rx_loop(midi: MidiToNt, state: GridState):
 
     Interpretation rules (must match the NT Lua script):
       - CC10: value 0..127 sets the current cursor index (page-local),
+      - CC11: value 1..127 sets the current page (1-based),
       - CC12: value 0 clears the playhead overlay entirely,
+      - CC13: value 1..96 sets the splice count (number of dim LEDs),
       - Note On vel = 20: mark the given index as enabled,
       - Note On vel = 0:  mark the given index as disabled,
       - Note On vel = 100: mark the given index as the playhead.
@@ -385,12 +426,16 @@ async def midi_rx_loop(midi: MidiToNt, state: GridState):
     while True:
         msg = await midi.rx_queue.get()
 
-        # Protocol: CC10 = cursor index; CC12 value 0 = clear playhead; Note On vel 20 = enabled, vel 100 = playhead, vel 0 = disabled
+        # Protocol: CC10 = cursor; CC11 = page; CC12 value 0 = clear playhead; CC13 = splice count
         if msg.type == "control_change":
             if msg.control == CC_CURSOR:
                 state.set_cursor(msg.value)
+            elif msg.control == CC_PAGE:
+                state.set_page(msg.value)
             elif msg.control == CC_PLAYHEAD_CLEAR and msg.value == 0:
                 state.set_playhead(None)
+            elif msg.control == CC_SPLICE_COUNT:
+                state.set_splice_count(msg.value)
 
         elif msg.type == "note_on":
             idx = msg.note
