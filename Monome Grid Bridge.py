@@ -1,13 +1,45 @@
 #!/usr/bin/env python3
 """
-Monome Grid Bridge: bridges a Monome grid to Expert Sleepers Disting NT via MIDI.
+Monome Grid Bridge
+===================
 
-- Grid key presses are sent to the NT as MIDI notes (index = note number).
-- Incoming MIDI from the NT (cursor CC, enabled/playhead note velocities) drives
-  grid LED state. Uses pymonome for grid I/O and mido for MIDI.
+High-level overview
+-------------------
+This script runs on a Raspberry Pi and acts as the *host side* of the system.
+It connects a Monome Grid 128 to an Expert Sleepers Disting NT running a Lua
+algorithm. The Pi:
 
-Requires serialosc to be running (see https://monome.org/docs/serialosc). Grid size
-is assumed 16×8 (128 keys); other sizes would need different GRID_W/GRID_H.
+- talks to the Grid over OSC via `serialosc` (using `pymonome`),
+- talks to the Disting NT over USB MIDI (using `mido`/`python-rtmidi`),
+- keeps an in-memory representation of the 16×8 grid state, and
+- renders that state to the physical Grid efficiently.
+
+Data flow
+---------
+- Grid → NT:
+    - When the user presses a key on the Grid, the bridge converts its
+      coordinates `(x, y)` to a linear index `i = y * 16 + x`, and sends
+      a MIDI Note On/Off to the NT (note = `i`, velocity 127/0).
+
+- NT → Grid:
+    - The Lua script on the NT sends semantic MIDI back to the Pi:
+        - CC10: current cursor index (page-local 0–127),
+        - CC12: value 0 means "clear playhead overlay",
+        - Note On, vel=20: splice/step enabled at index,
+        - Note On, vel=0: splice/step disabled at index,
+        - Note On, vel=100: playhead at index.
+    - The bridge consumes these messages and updates a 16×8 framebuffer
+      that expresses *enabled*, *cursor*, and *playhead* overlays.
+      Only when that framebuffer changes do we push a full-frame update
+      to the Grid.
+
+Runtime assumptions
+-------------------
+- `serialosc` is running and has discovered a Grid device.
+- The Grid is 16×8 (Monome 128). For other sizes, `GRID_W/GRID_H` and
+  the NT Lua script need to be changed together.
+- The NT Lua script uses the semantic protocol described above and its
+  `MIDI ch` parameter matches `NT_MIDI_CH_1TO16` below.
 """
 import asyncio
 import time
@@ -79,8 +111,18 @@ class Overlays:
 
 class GridState:
     """
-    Cell state driven by NT semantic MIDI: which steps are enabled,
-    plus cursor and playhead overlays. Used to compose the grid frame.
+    Mutable framebuffer state for the Grid.
+
+    This class tracks three conceptual layers:
+      - enabled:   which linear indices 0..127 are enabled by the NT,
+      - cursor:    which index the NT considers "selected",
+      - playhead:  which index the NT is currently playing.
+
+    The Lua script on the NT never talks about (x, y) coordinates directly;
+    it only sends MIDI notes/CCs with an index 0..127. GridState translates
+    those linear indices into 2D coordinates, composes priorities
+    (playhead > cursor > enabled > off), and produces a 16×8 matrix of
+    brightness levels that can be flushed to the physical Grid.
     """
     def __init__(self):
         self.enabled = [False] * 128
@@ -136,9 +178,27 @@ class GridState:
 
 class MidiToNt:
     """
-    NT MIDI: port auto-detect, incoming messages via asyncio queue,
-    and outgoing note/CC send. Callbacks from mido run on a background thread
-    and are forwarded into the event loop.
+    Bi-directional MIDI interface to the Disting NT.
+
+    Responsibilities
+    ----------------
+    - Discover the correct USB MIDI input/output ports for the NT by
+      matching substrings in `mido.get_*_names()`.
+    - Open those ports and expose a simple API for:
+        * sending Note On/Off and Control Change messages on the NT's
+          configured channel,
+        * receiving any MIDI from the NT and pushing it into an
+          `asyncio.Queue` for the main event loop to consume.
+
+    Threading model
+    ---------------
+    - `mido` invokes the input callback on a background thread whenever
+      a MIDI message arrives.
+    - We bridge that to asyncio with `loop.call_soon_threadsafe`,
+      which schedules `rx_queue.put_nowait(msg)` on the main event loop.
+    - The rest of the code (`midi_rx_loop`) treats `rx_queue` as a
+      normal async source of messages and does not need to care that
+      the data came from another thread.
     """
     def __init__(self, loop: asyncio.AbstractEventLoop):
         self.loop = loop
@@ -226,9 +286,17 @@ class MidiToNt:
 
 class GridBridge(monome.GridApp):
     """
-    Monome grid app: key events are sent to the NT as MIDI notes.
-    LED state is driven by a separate render loop using GridState (not key handlers).
-    Key events follow serialosc /grid/key: (x, y, s) with s=1 down, s=0 up.
+    Monome Grid client application.
+
+    This class is responsible for:
+      - receiving key events from `serialosc`/`pymonome`,
+      - converting grid coordinates to a linear index understood by the NT,
+      - sending the appropriate Note On/Off to the NT via `MidiToNt`,
+      - owning a `GridBuffer` used by the render loop to push LED frames.
+
+    Important: key handlers *do not* drive LEDs directly. Instead, LEDs are
+    a pure function of semantic MIDI state from the NT (encoded in a
+    `GridState` instance) and are rendered by `render_loop` at up to 60 FPS.
     """
     def __init__(self, midi: MidiToNt):
         super().__init__()
@@ -260,8 +328,17 @@ class GridBridge(monome.GridApp):
 
 async def render_loop(app: GridBridge, state: GridState):
     """
-    Periodically compose the grid frame from state and push to the device.
-    Runs at up to 60 FPS; only flushes when state is dirty or playhead flash toggles.
+    Periodically render the logical grid state to the physical Grid.
+
+    This coroutine:
+      - runs at up to 60 FPS,
+      - toggles a `playhead_flash` flag at ~4 Hz to make the playhead blink,
+      - asks `GridState` to compose a brightness matrix whenever the state
+        has changed (dirty flag),
+      - writes that matrix into `app.buffer` and flushes it to the Grid.
+
+    It never blocks on I/O other than the sleep, so MIDI reception and
+    other asyncio tasks (e.g. `midi_rx_loop`) keep running smoothly.
     """
     FPS_LIMIT = 60.0
     min_dt = 1.0 / FPS_LIMIT
@@ -292,7 +369,19 @@ async def render_loop(app: GridBridge, state: GridState):
 
 
 async def midi_rx_loop(midi: MidiToNt, state: GridState):
-    """Process NT MIDI from the queue and update GridState (cursor, enabled, playhead)."""
+    """
+    Consume semantic MIDI messages from the NT and update `GridState`.
+
+    Interpretation rules (must match the NT Lua script):
+      - CC10: value 0..127 sets the current cursor index (page-local),
+      - CC12: value 0 clears the playhead overlay entirely,
+      - Note On vel = 20: mark the given index as enabled,
+      - Note On vel = 0:  mark the given index as disabled,
+      - Note On vel = 100: mark the given index as the playhead.
+
+    Any time `GridState` changes, its `dirty` flag is set and the
+    render loop will send a new frame to the Grid.
+    """
     while True:
         msg = await midi.rx_queue.get()
 

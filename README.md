@@ -1,16 +1,36 @@
 Disting NT ↔ Monome Grid Bridge (Raspberry Pi 5)
+===============================================
 
-A high-performance Python bridge that connects an Expert Sleepers Disting NT to a Monome Grid 128 using a Raspberry Pi 5.
-This project implements a bidirectional MIDI protocol and a fast, buffered LED rendering pipeline using:
+Project purpose
+---------------
+This project connects an Expert Sleepers **Disting NT** running a custom Lua
+algorithm to a **Monome Grid 128**, using a **Raspberry Pi 5** as the host.
 
-pymonome (serialosc)
-mido
-python-rtmidi
-asyncio-based event architecture
+The system is split into two cooperating parts:
 
-The result is a tightly synchronized 1:1 mapping between the Grid (16×8) and NT UI state, with semantic mirroring and flicker-free full-frame updates.
+- **Lua algorithm on the Disting NT**  
+  (`Morphagene L-System Splice Stepper 30.lua`)  
+  Implements a Morphagene-oriented L-system splice stepper, drives ORGANIZE
+  and PLAY outputs, and emits *semantic MIDI* describing its UI state
+  (cursor, enabled steps, playhead).
+
+- **Python bridge on the Raspberry Pi**  
+  (`Monome Grid Bridge.py`)  
+  Talks to the Grid over OSC (via `serialosc`/`pymonome`) and to the NT
+  over USB MIDI (via `mido`/`python-rtmidi`), maintains a framebuffer for
+  the 16×8 grid, and renders the Lua script's state to the Grid.
+
+The result is a tightly synchronized 1:1 mapping between the Grid (16×8)
+and NT UI state, with semantic mirroring and flicker-free full-frame updates.
+
+Implementation stack
+--------------------
+- `pymonome` (serialosc client for Monome devices)
+- `mido` + `python-rtmidi` (MIDI I/O)
+- `asyncio`-based event architecture on the Pi
 
 Overview
+--------
 The bridge provides:
 1:1 coordinate mapping (Grid 16×8 → NT 128-step model)
 Semantic MIDI protocol for state mirroring
@@ -52,20 +72,30 @@ On Disting NT
 Lua algorithm
 Semantic state emission (Note/CC messages)
 Semantic MIDI Protocol
+----------------------
 
-Grid → NT
+Grid → NT (from Pi / Python bridge)
 
-Note On: note = y*16 + x, velocity 127
-Note Off: velocity 0
+- **Note On**: `note = y*16 + x`, `velocity = 127` (key down)
+- **Note Off**: `velocity = 0` (key up)
 
-NT → Grid (Semantic Mirroring)
-Message	Meaning
-CC10 value=0–127	Cursor index
-NoteOn vel=20	Enabled step
-NoteOn vel=0	Disabled step
-NoteOn vel=100	Playhead
+NT → Grid (from Lua on the Disting NT, consumed by the Pi)
 
-**Compatible NT algorithm:** The Lua script `Morphagene L-System Splice Stepper 30.lua` is designed to work with this bridge. Load it on the Disting NT; it uses the same semantic protocol above (CC10 cursor, vel 20/0/100 for enabled/disabled/playhead) and treats the grid as a 16×8 page window over up to 300 Morphagene splices.
+| Message              | Meaning                            |
+|----------------------|------------------------------------|
+| CC10 value = 0–127   | Cursor index (page-local)         |
+| CC11 value = 1–127   | Current page index (1-based)      |
+| CC12 value = 0       | Clear playhead overlay            |
+| Note On vel = 20     | Enabled step at index (note)      |
+| Note On vel = 0      | Disabled step at index (note)     |
+| Note On vel = 100    | Playhead at index (note)          |
+
+**Compatible NT algorithm:**  
+The Lua script `Morphagene L-System Splice Stepper 30.lua` is designed to
+work with this bridge. Load it on the Disting NT; it uses the semantic
+protocol above (CC10 cursor, CC12 clear, vel 20/0/100 for
+enabled/disabled/playhead) and treats the grid as a 16×8 page window over
+up to 96 Morphagene splices (MAX_SPLICES in the Lua script).
 
 This avoids SysEx and keeps bandwidth low while preserving state meaning.
 
@@ -76,13 +106,43 @@ Playhead flashing overlay
 Clean semantic state separation
 Designed for extensibility (paging, modes, probability layers)
 
+Scripts and responsibilities
+----------------------------
+
+- `Monome Grid Bridge.py`  
+  - Discovers the Grid via `serialosc` and connects to it with `pymonome`.  
+  - Discovers the Disting NT USB MIDI ports and connects with `mido`.  
+  - Converts Grid key events to MIDI notes for the NT.  
+  - Receives semantic MIDI from the NT and maintains a 16×8 framebuffer
+    (`GridState`) describing enabled steps, cursor, and playhead.  
+  - Periodically renders the framebuffer to the Grid using a `GridBuffer`.
+
+- `Morphagene L-System Splice Stepper 30.lua`  
+  - Implements a 96-splice L-system step sequencer for Morphagene.  
+  - OUT1: Morphagene ORGANIZE CV (0–5 V, bin-centered across splices).  
+  - OUT2: 5 V gate to Morphagene PLAY.  
+  - Maintains internal state: active splices, enabled list, cursor, playhead,
+    and current ORGANIZE voltage.  
+  - Emits semantic MIDI (CC/Note messages) to mirror its state to the Grid
+    via the Pi bridge.
+
+- `systemd/serialoscd.service`  
+  - User service that runs the Monome `serialoscd` daemon under the chosen
+    Linux user account and wires it to the journal for logging.
+
+- `systemd/monome-grid-bridge.service`  
+  - System service that starts the Python bridge after `serialoscd` is up,
+    with a small delay to let USB/OSC settle, and restarts on failure.
+
 Requirements
-Raspberry Pi 5 (Raspberry Pi OS recommended)
-Expert Sleepers Disting NT
-Monome Grid 128
-serialosc installed and running
+------------
+- Raspberry Pi 5 (Raspberry Pi OS recommended)
+- Expert Sleepers Disting NT
+- Monome Grid 128
+- `serialosc` installed and running
 
 Raspberry Pi documentation
+--------------------------
 Official setup and reference: [Raspberry Pi Documentation](https://www.raspberrypi.com/documentation/).
 
 - **First-time setup:** Use [Raspberry Pi Imager](https://www.raspberrypi.com/documentation/computers/getting-started.html#install-using-imager) to install Raspberry Pi OS (32 GB+ SD card recommended). You can enable SSH in Imager’s customisation for headless use.
@@ -90,7 +150,7 @@ Official setup and reference: [Raspberry Pi Documentation](https://www.raspberry
 - **USB:** The Monome Grid and Disting NT connect over USB; no extra drivers are needed. If serialosc reports “Permission denied”, add your user to `dialout`/`uucp` (see step 3 below).
 
 Installation
-
+------------
 **Note:** On Raspberry Pi OS (Debian), `serialosc` is not in the default apt repositories. Install it by building from source as below. On Ubuntu you can use `sudo add-apt-repository ppa:artfwo/monome` then `apt install serialosc` instead.
 
 1. Install system packages and build dependencies
@@ -137,7 +197,7 @@ python3 -m pip install -r requirements.txt
 ```
 
 Running
-
+-------
 Connect:
 
 - Disting NT via USB
@@ -154,6 +214,7 @@ python3 "Monome Grid Bridge.py"
 ```
 
 Start at boot (systemd)
+-----------------------
 To have serialosc and the bridge start automatically on boot (recommended on Raspberry Pi):
 
 1. Copy the service files into systemd (run from the project directory):
@@ -184,39 +245,47 @@ If your username is not `admin`, edit both `.service` files and change `User=adm
 
 You should see:
 
+```text
 [MIDI] Connected IN : ...
 [MIDI] Connected OUT: ...
 [GRID] Connected to device ...
-Running. Grid press -> NT notes. NT semantic MIDI -> grid LEDs.
-Mapping Model
+Running. Grid key → NT notes. NT semantic MIDI → grid LEDs.
+```
+
+Mapping model
+-------------
 
 Index mapping is 1:1 across the system:
-index = y * 16 + x
-Grid (x,y)
-MIDI note number
-NT internal step index
-Framebuffer index
 
+- `index = y * 16 + x`  
+- Grid `(x, y)`  
+- MIDI note number  
+- NT internal step index  
+- Framebuffer index
 
+Brightness semantics (Grid 0–15)
+--------------------------------
 
-Brightness Semantics (Grid 0–15)
-Level	Meaning
-0	     Off
-6	     Enabled
-12	     Cursor
-15	     Playhead
+| Level | Meaning  |
+|-------|----------|
+| 0     | Off      |
+| 6     | Enabled  |
+| 12    | Cursor   |
+| 15    | Playhead |
 
 Overlay priority:
 
-Playhead > Cursor > Enabled > Off
-Extending the System
+`Playhead > Cursor > Enabled > Off`
+
+Extending the system
+--------------------
 
 Planned / easy extensions:
 
-Paging for >128 NT steps
-Probability visualization via brightness scaling
-Multiple UI modes (edit/play)
-MIDI clock sync
-Bidirectional state refresh
-Robust hot-reconnect handling
+- Paging for >128 NT steps
+- Probability visualization via brightness scaling
+- Multiple UI modes (edit/play)
+- MIDI clock sync
+- Bidirectional state refresh
+- Robust hot-reconnect handling
 

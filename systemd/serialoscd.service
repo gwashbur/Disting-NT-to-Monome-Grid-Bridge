@@ -1,17 +1,32 @@
 [Unit]
 Description=Monome serialosc daemon (grid/arc OSC server)
+Documentation=https://monome.org/docs/serialosc
+
+# Wait until the network stack is ready; useful if OSC clients run on other hosts.
 After=network.target
-# Allow USB to be ready
+
+# Ensure USB and udev have settled so the Grid enumerates cleanly before serialosc
+# starts watching for devices.
 After=systemd-udev-settle.service
 
 [Service]
 Type=simple
+
+# Linux user account that owns the serialosc configuration in ~/.config/serialosc.
 User=admin
-# Required so serialoscd can use ~/.config/serialosc
+
+# Required so serialoscd writes its configuration under /home/admin/.config/serialosc
+# instead of trying to use root's home directory.
 Environment="HOME=/home/admin"
+
+# Monome-provided daemon that bridges USB serial devices (grid/arc) to OSC.
 ExecStart=/usr/local/bin/serialoscd
+
+# Restart on failure; keep trying every 10 seconds if something goes wrong.
 Restart=always
 RestartSec=10
+
+# Send stdout/stderr to the journal so `journalctl -u serialoscd.service` shows logs.
 StandardOutput=journal
 StandardError=journal
 
