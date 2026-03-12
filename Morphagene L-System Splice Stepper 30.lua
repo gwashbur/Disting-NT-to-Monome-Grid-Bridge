@@ -41,22 +41,27 @@ local STATE_TRIGGERED    = 6
 local MIDI_DEST_USB = 0x4
 
 local mg = {
+    -- Total number of splices. The valid splice range is always 1..nSplices.
     nSplices = 20,
+    -- Page index used only for UI and grid paging. Playback is always over
+    -- splice indices 1..nSplices in ascending order, wrapping back to 1.
     page = 1,
+    -- Cursor index for UI navigation (does not affect playback order).
     cursorIndex = 1,
 
-    active = {},
-    enabled = {},
-    enabledCount = 0,
-
-    pos = 0,                -- position within enabled[]; 0 = not started
+    -- Current splice index being played (1..nSplices), or 0 when stopped.
+    pos = 0,
+    -- Cached ORGANIZE CV corresponding to the current splice.
     cachedCV = 0.0,
 
+    -- Pulse / trigger UI state.
     pulseRemaining = 0.0,   -- seconds
     triggerFlash = 0.0,     -- seconds, for UI highlight
 
+    -- Per-splice UI state for the on-module display.
     cellState = {},
 
+    -- Full MIDI sync flag for the Monome Grid bridge.
     needsMidiFullSync = true,
     lastPlayheadIndex = 0,
     lastCursorIndex = 0,
@@ -64,7 +69,6 @@ local mg = {
 }
 
 for i = 1, MAX_SPLICES do
-    mg.active[i] = false
     mg.cellState[i] = STATE_EMPTY
 end
 
@@ -207,43 +211,14 @@ local function sendFullPageState(self)
         sendEnableStateForAbs(self, i)
     end
 
-    if mg.pos ~= 0 and mg.enabledCount > 0 then
-        local playSplice = mg.enabled[mg.pos]
-        if playSplice then
-            sendPlayhead(self, playSplice)
-        end
+    if mg.pos ~= 0 and mg.pos >= 1 and mg.pos <= mg.nSplices then
+        -- Active playhead within the valid splice range.
+        sendPlayhead(self, mg.pos)
     else
         sendPlayheadClear(self)
     end
 
     mg.needsMidiFullSync = false
-end
-
--- Enabled list + cursor/playhead helpers
-
-local function rebuildEnabledList()
-    mg.enabledCount = 0
-    for i = 1, mg.nSplices do
-        if mg.active[i] then
-            mg.enabledCount = mg.enabledCount + 1
-            mg.enabled[mg.enabledCount] = i
-        end
-    end
-
-    for i = mg.enabledCount + 1, #mg.enabled do
-        mg.enabled[i] = nil
-    end
-end
-
-local function findCursorPosInEnabled()
-    if mg.enabledCount <= 0 then return 0 end
-    local cur = mg.cursorIndex
-    for p = 1, mg.enabledCount do
-        if mg.enabled[p] == cur then
-            return p
-        end
-    end
-    return 0
 end
 
 local function recomputeAndClampParams(self)
@@ -265,83 +240,82 @@ local function moveCursorToPageStart()
     mg.cursorIndex = clamp(s, 1, mg.nSplices)
 end
 
--- When (re)starting the sequencer from a stopped state, always begin from the
--- lowest-numbered active splice (splice 1 if active, otherwise 2, 3, ...).
--- Returns true if a valid starting splice was found, false if there are none.
-local function startFromFirstActive()
-    rebuildEnabledList()
-    if mg.enabledCount <= 0 then
-        mg.pos = 0
-        mg.cachedCV = 0.0
-        return false
-    end
+-- Deterministic splice traversal helpers
 
-    mg.pos = 1
-    local spliceIndex = mg.enabled[mg.pos]
-    mg.cachedCV = spliceIndexToVoltage(spliceIndex)
-    return true
+local function get_splice_count()
+    return mg.nSplices
 end
 
--- After any change to mg.active (enabling/disabling splices), ensure that:
--- - the enabled list is up to date,
--- - the sequencer is stopped if there are no active splices,
--- - otherwise the playhead points at a valid active splice (the first active),
--- - ORGANIZE CV and grid state will be refreshed on the next draw.
-local function ensureValidPlayhead(self)
-    rebuildEnabledList()
+local function get_lowest_valid_splice()
+    if mg.nSplices <= 0 then
+        return nil
+    end
+    return 1
+end
 
-    if mg.enabledCount <= 0 then
+local function get_next_splice(current)
+    local n = mg.nSplices
+    if n <= 0 then
+        return nil
+    end
+    if current < 1 or current > n then
+        return 1
+    end
+    if current == n then
+        -- Wraparound: after the last splice, go back to 1.
+        return 1
+    end
+    return current + 1
+end
+
+-- After any splice-count change, make sure the current splice is either a
+-- valid index within 1..nSplices or 0 (stopped). If we were playing and the
+-- current splice is now out of range, jump immediately to the lowest valid
+-- splice so we never output an invalid index.
+local function resolve_current_splice_after_count_change(self)
+    local n = mg.nSplices
+    if n <= 0 then
         mg.pos = 0
         mg.cachedCV = 0.0
-        -- Explicitly clear playhead overlay on the grid when nothing is active.
         sendPlayheadClear(self)
         mg.needsMidiFullSync = true
         return
     end
 
-    local currentSplice = nil
-    if mg.pos ~= 0 and mg.enabledCount > 0 and mg.enabled[mg.pos] then
-        currentSplice = mg.enabled[mg.pos]
+    if mg.pos == 0 then
+        -- Stopped: nothing else to do until the next trigger edge.
+        return
     end
 
-    if mg.pos == 0 or not currentSplice or not mg.active[currentSplice] then
-        mg.pos = 1
-        currentSplice = mg.enabled[1]
-    end
-
-    mg.cachedCV = spliceIndexToVoltage(currentSplice)
-    mg.needsMidiFullSync = true
-end
-
--- L-system-like weighted motion
-
-local STEP_WEIGHTS = {
-    [-2] = 1,
-    [-1] = 3,
-    [ 0] = 4,
-    [ 1] = 3,
-    [ 2] = 1
-}
-
-local function weightedChoice(tbl)
-    local total = 0
-    for _, w in pairs(tbl) do
-        total = total + w
-    end
-
-    local r = math.random() * total
-    local acc = 0
-    for k, w in pairs(tbl) do
-        acc = acc + w
-        if r <= acc then
-            return k
+    if mg.pos > n then
+        mg.pos = get_lowest_valid_splice() or 0
+        if mg.pos > 0 then
+            mg.cachedCV = spliceIndexToVoltage(mg.pos)
+        else
+            mg.cachedCV = 0.0
         end
+        mg.needsMidiFullSync = true
     end
-    return 0
 end
 
-local function nextMove()
-    return weightedChoice(STEP_WEIGHTS)
+-- Handle playstate rising edge (stopped → playing). This is called on the
+-- first trigger after mg.pos == 0. Behavior:
+--   - If there is at least one valid splice (nSplices >= 1), start at splice 1.
+--   - Otherwise, remain safely idle.
+local function handle_playstate_rising_edge(self)
+    local first = get_lowest_valid_splice()
+    if not first then
+        mg.pos = 0
+        mg.cachedCV = 0.0
+        sendPlayheadClear(self)
+        return
+    end
+
+    mg.pos = first
+    mg.cachedCV = spliceIndexToVoltage(mg.pos)
+    mg.pulseRemaining = clamp(self.parameters[2], 1, 1000) / 1000.0
+    mg.triggerFlash = 0.08
+    sendPlayhead(self, mg.pos)
 end
 
 -- Semantic UI state
@@ -360,9 +334,7 @@ local function updateCellStates()
 
     -- Base enabled state
     for i = 1, mg.nSplices do
-        if mg.active[i] then
-            mg.cellState[i] = STATE_ENABLED
-        end
+        mg.cellState[i] = STATE_ENABLED
     end
 
     -- Cursor overlay.
@@ -378,20 +350,14 @@ local function updateCellStates()
         end
     end
 
-    -- Playhead
-    if mg.pos ~= 0 and mg.enabledCount > 0 then
-        local playSplice = mg.enabled[mg.pos]
-        if playSplice then
-            mg.cellState[playSplice] = STATE_PLAYHEAD
-        end
+    -- Playhead (current splice index if playing)
+    if mg.pos ~= 0 and mg.pos >= 1 and mg.pos <= mg.nSplices then
+        mg.cellState[mg.pos] = STATE_PLAYHEAD
     end
 
     -- Trigger flash overrides playhead briefly
-    if mg.triggerFlash > 0.0 and mg.pos ~= 0 and mg.enabledCount > 0 then
-        local playSplice = mg.enabled[mg.pos]
-        if playSplice then
-            mg.cellState[playSplice] = STATE_TRIGGERED
-        end
+    if mg.triggerFlash > 0.0 and mg.pos ~= 0 and mg.pos >= 1 and mg.pos <= mg.nSplices then
+        mg.cellState[mg.pos] = STATE_TRIGGERED
     end
 end
 
@@ -434,15 +400,10 @@ end
 -- Main algorithm
 
 return {
-    name   = "MG L-System Splice Stepper 300",
+    name   = "MG Deterministic Splice Stepper",
     author = "OpenAI / revised",
 
     init = function(self)
-        for i = 1, MAX_SPLICES do
-            mg.active[i] = false
-            mg.cellState[i] = STATE_EMPTY
-        end
-
         mg.nSplices = 20
         mg.page = 1
         mg.cursorIndex = 1
@@ -450,13 +411,14 @@ return {
         mg.cachedCV = spliceIndexToVoltage(1)
         mg.pulseRemaining = 0.0
         mg.triggerFlash = 0.0
-        mg.enabledCount = 0
         mg.needsMidiFullSync = true
         mg.lastPlayheadIndex = 0
         mg.lastCursorIndex = 0
         mg.lastPage = 1
 
-        rebuildEnabledList()
+        for i = 1, MAX_SPLICES do
+            mg.cellState[i] = STATE_EMPTY
+        end
         updateCellStates()
 
         return {
@@ -484,61 +446,52 @@ return {
     trigger = function(self, input)
         if input ~= 1 then return end
 
-        recomputeAndClampParams(self)
-        rebuildEnabledList()
+        -- Playstate edge detection and deterministic traversal:
+        --  - On first trigger after stop (pos == 0): start at splice 1 if it exists.
+        --  - While playing: advance 1 → 2 → ... → nSplices → 1 → ...
+        --  - Live splice-count changes: clamp/resolve current splice safely.
 
-        if mg.enabledCount <= 0 then
-            -- No active splices at all: stop and clear playhead.
+        recomputeAndClampParams(self)
+        resolve_current_splice_after_count_change(self)
+
+        local n = get_splice_count()
+        if n <= 0 then
+            -- No valid splices: safe idle, do not output an invalid splice index.
             sendPlayheadClear(self)
             return
         end
 
         if mg.pos == 0 then
-            -- First step after stop: start from the lowest-numbered active splice.
-            local ok = startFromFirstActive()
-            if not ok then
-                sendPlayheadClear(self)
-                return
-            end
-
-            mg.pulseRemaining = clamp(self.parameters[2], 1, 1000) / 1000.0
-            mg.triggerFlash = 0.08
-
-            local playSplice = mg.enabled[mg.pos]
-            sendPlayhead(self, playSplice)
+            -- Rising edge from stopped → playing.
+            handle_playstate_rising_edge(self)
             return
         end
 
-        local move = nextMove()
-        local newPos = wrap(mg.pos + move, 1, mg.enabledCount)
-        mg.pos = newPos
+        -- Sequential advance: 1 → 2 → ... → n → 1 → ...
+        mg.pos = get_next_splice(mg.pos) or 0
+        if mg.pos == 0 then
+            sendPlayheadClear(self)
+            mg.cachedCV = 0.0
+            return
+        end
 
-        local spliceIndex = mg.enabled[mg.pos]
-        mg.cachedCV = spliceIndexToVoltage(spliceIndex)
-
+        mg.cachedCV = spliceIndexToVoltage(mg.pos)
         mg.pulseRemaining = clamp(self.parameters[2], 1, 1000) / 1000.0
         mg.triggerFlash = 0.08
 
-        sendPlayhead(self, spliceIndex)
+        sendPlayhead(self, mg.pos)
     end,
 
     -- Grid key presses from Monome Grid Bridge arrive as USB MIDI Note On
-    -- (note = page-local index 0..127, vel = 127). Toggle the step at that index.
+    -- (note = page-local index 0..127, vel = 127). In this deterministic
+    -- version, they do not alter playback order (which is always 1..nSplices);
+    -- they are reserved for future extensions and currently ignored.
     midiMessage = function(self, msg)
         local status, note, vel = msg[1], msg[2], msg[3]
-        -- Note On: status 0x90..0x9F, velocity > 0
+        -- Note On: status 0x90..0x9F, velocity > 0. Ignored for now.
         if not status or status < 0x90 or status > 0x9F or not vel or vel == 0 then
             return
         end
-        recomputeAndClampParams(self)
-        local absIndex = pageLocalToAbs(note)
-        if absIndex < 1 or absIndex > mg.nSplices then
-            return
-        end
-        mg.active[absIndex] = not mg.active[absIndex]
-        sendEnableStateForAbs(self, absIndex)
-        -- Any grid edit must immediately reflect in enabled list and playhead.
-        ensureValidPlayhead(self)
     end,
 
     step = function(self, dt, inputs)
@@ -629,25 +582,32 @@ return {
     button2Push = function(self)
         recomputeAndClampParams(self)
 
-        for i = 1, mg.nSplices do
-            mg.active[i] = false
-        end
-        -- All off → sequencer off and playhead cleared.
-        ensureValidPlayhead(self)
+        -- Clear: stop playback and clear playhead; splice count is unchanged.
+        mg.pos = 0
+        mg.cachedCV = 0.0
+        sendPlayheadClear(self)
+        mg.needsMidiFullSync = true
     end,
 
     button3Push = function(self)
         recomputeAndClampParams(self)
 
-        for i = 1, mg.nSplices do
-            mg.active[i] = true
+        -- Reset playhead to the lowest valid splice without toggling playstate.
+        if mg.nSplices <= 0 then
+            mg.pos = 0
+            mg.cachedCV = 0.0
+            sendPlayheadClear(self)
+        else
+            mg.pos = get_lowest_valid_splice() or 1
+            mg.cachedCV = spliceIndexToVoltage(mg.pos)
+            mg.needsMidiFullSync = true
         end
-        -- All on → start from the first splice on next trigger.
-        ensureValidPlayhead(self)
     end,
 
     button4Push = function(self)
         mg.pos = 0
+        mg.cachedCV = 0.0
+        sendPlayheadClear(self)
         mg.needsMidiFullSync = true
     end,
 
@@ -655,26 +615,18 @@ return {
 
     draw = function(self)
         recomputeAndClampParams(self)
-        rebuildEnabledList()
         updateCellStates()
 
         if mg.needsMidiFullSync then
             sendFullPageState(self)
         end
 
-        local s, e = currentPageRange()
-        local countThisPage = e - s + 1
         local maxPage = pageCountForN(mg.nSplices)
 
         -- Header
         drawText(2, 2, "N=" .. mg.nSplices .. "  Pg " .. mg.page .. "/" .. maxPage)
         drawText(120, 2, "Cur=" .. mg.cursorIndex)
-        drawText(190, 2, "En=" .. mg.enabledCount)
-
-        local playSplice = 0
-        if mg.pos ~= 0 and mg.enabledCount > 0 then
-            playSplice = mg.enabled[mg.pos] or 0
-        end
+        local playSplice = (mg.pos ~= 0) and mg.pos or 0
         drawText(2, 11, "Play=" .. playSplice .. "  CV=" .. string.format("%.3f", mg.cachedCV))
 
         -- 16x8 fixed page grid

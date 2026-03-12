@@ -10,9 +10,9 @@ The system is split into two cooperating parts:
 
 - **Lua algorithm on the Disting NT**  
   (`Morphagene L-System Splice Stepper 30.lua`)  
-  Implements a Morphagene-oriented L-system splice stepper, drives ORGANIZE
-  and PLAY outputs, and emits *semantic MIDI* describing its UI state
-  (cursor, enabled steps, playhead).
+  Implements a Morphagene-oriented, deterministic splice stepper, drives
+  ORGANIZE and PLAY outputs, and emits *semantic MIDI* describing its state
+  (splice count, current splice, cursor, page).
 
 - **Python bridge on the Raspberry Pi**  
   (`Monome Grid Bridge.py`)  
@@ -43,8 +43,7 @@ Serialosc device discovery for monome Grid
 Designed for:
 Sequencer control
 Morphagene splice navigation
-L-system step walkers
-Generative pattern systems
+Deterministic splice steppers
 Custom NT Lua UI integration
 Architecture
 
