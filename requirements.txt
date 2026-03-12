@@ -1,3 +1,4 @@
+# Monome Grid Bridge: grid (serialosc), NT (MIDI)
 pymonome
 mido
 python-rtmidi

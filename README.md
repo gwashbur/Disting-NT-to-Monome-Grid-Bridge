@@ -1,292 +1,66 @@
-Disting NT ↔ Monome Grid Bridge (Raspberry Pi 5)
-===============================================
+# Disting NT ↔ Monome Grid Bridge (Raspberry Pi 5)
 
-Project purpose
----------------
-This project connects an Expert Sleepers **Disting NT** running a custom Lua
-algorithm to a **Monome Grid 128**, using a **Raspberry Pi 5** as the host.
+Connects a **Disting NT** (Lua algorithm) to a **Monome Grid 128** via a **Raspberry Pi 5**: Grid key events → NT; NT state → grid LEDs.
 
-The system is split into two cooperating parts:
+**Stack:** `pymonome`, `mido`, `python-rtmidi`, `asyncio`. Grid over OSC (serialosc); NT over USB MIDI.
 
-- **Lua algorithm on the Disting NT**  
-  (`Morphagene L-System Splice Stepper 30.lua`)  
-  Implements a Morphagene-oriented, deterministic splice stepper, drives
-  ORGANIZE and PLAY outputs, and emits *semantic MIDI* describing its state
-  (splice count, current splice, cursor, page).
+## Parts
 
-- **Python bridge on the Raspberry Pi**  
-  (`Monome Grid Bridge.py`)  
-  Talks to the Grid over OSC (via `serialosc`/`pymonome`) and to the NT
-  over USB MIDI (via `mido`/`python-rtmidi`), maintains a framebuffer for
-  the 16×8 grid, and renders the Lua script's state to the Grid.
+- **Lua** (`Morphagene L-System Splice Stepper 30.lua`): Deterministic splice stepper for Morphagene. OUT1 = ORGANIZE CV (0–5 V), OUT2 = PLAY gate. Sends splice count and playhead to the bridge.
+- **Python** (`Monome Grid Bridge.py`): Discovers grid (serialosc) and NT (MIDI). Keeps `splice_count` and `playhead`; renders dim LEDs for valid splices, bright blinking for current splice. Sends CC127 on startup to request state.
+- **systemd:** `serialoscd.service`, `monome-grid-bridge.service` for autostart.
 
-The result is a tightly synchronized 1:1 mapping between the Grid (16×8)
-and NT UI state, with semantic mirroring and flicker-free full-frame updates.
+## Protocol
 
-Implementation stack
---------------------
-- `pymonome` (serialosc client for Monome devices)
-- `mido` + `python-rtmidi` (MIDI I/O)
-- `asyncio`-based event architecture on the Pi
+**Grid → NT:** Note On/Off, `note = y*16 + x`, vel 127/0.
 
-Overview
---------
-The bridge provides:
-1:1 coordinate mapping (Grid 16×8 → NT 128-step model)
-Semantic MIDI protocol for state mirroring
-Buffered LED rendering via GridBuffer
-Overlay composition (cursor + playhead)
-Clean separation between logic and rendering
-Auto-detection of Disting NT MIDI ports
-Serialosc device discovery for monome Grid
+**NT → Grid (bridge uses only these):**
 
-Designed for:
-Sequencer control
-Morphagene splice navigation
-Deterministic splice steppers
-Custom NT Lua UI integration
-Architecture
+| Message | Meaning |
+|---------|---------|
+| CC12 value 0 | Clear playhead |
+| CC13 value 0–96 | Splice count (how many dim LEDs) |
+| Note On vel 100 | Playhead at index (page-local) |
 
-Signal flow:
+**Startup:** Bridge sends CC127; Lua replies with CC13 and playhead or CC12 clear.
 
-Monome Grid
-     │
-     │ (OSC via serialosc)
-     ▼
-Raspberry Pi 5 (Python bridge)
-     │
-     │ (USB MIDI)
-     ▼
-Disting NT (Lua script)
+## LED behavior
 
-Layer Breakdown
+- **Dim** = valid splice (index 1..splice_count), not playing.
+- **Bright + blinking** = current playing splice.
+- **Off** = out of range or splice_count 0.
 
-On Raspberry Pi
-MIDI interface (NT USB)
-Framebuffer state model (16×8)
-Overlay manager
-Grid renderer (buffered full-frame updates)
+Bridge starts with `splice_count = 0` (no dim LEDs) until Lua responds.
 
-On Disting NT
-Lua algorithm
-Semantic state emission (Note/CC messages)
-Semantic MIDI Protocol
-----------------------
+## Requirements
 
-Grid → NT (from Pi / Python bridge)
+Raspberry Pi 5, Disting NT, Monome Grid 128, `serialosc` (build from source on Raspberry Pi OS).
 
-- **Note On**: `note = y*16 + x`, `velocity = 127` (key down)
-- **Note Off**: `velocity = 0` (key up)
+## Install
 
-NT → Grid (from Lua on the Disting NT, consumed by the Pi)
+1. System deps: `sudo apt install -y python3-pip git liblo-dev libudev-dev libavahi-compat-libdnssd-dev libuv1-dev`
+2. Build serialosc: clone [libmonome](https://github.com/monome/libmonome), then [serialosc](https://github.com/monome/serialosc) (./waf configure && ./waf && sudo ./waf install). `sudo ldconfig`.
+3. Optional USB: `sudo gpasswd -a $USER uucp dialout` then re-login.
+4. Python: `cd /path/to/repo && python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt`
 
-| Message              | Meaning                            |
-|----------------------|------------------------------------|
-| CC10 value = 0–127   | Cursor index (page-local)         |
-| CC11 value = 1–127   | Current page index (1-based)      |
-| CC12 value = 0       | Clear playhead overlay            |
-| CC13 value = 1–96    | Splice count (number of dim LEDs) |
-| Note On vel = 20     | Enabled step at index (note)      |
-| Note On vel = 0      | Disabled step at index (note)     |
-| Note On vel = 100    | Playhead at index (note)          |
+## Run
 
-**Compatible NT algorithm:**  
-The Lua script `Morphagene L-System Splice Stepper 30.lua` is designed to
-work with this bridge. Load it on the Disting NT; it uses the semantic
-protocol above (CC10 cursor, CC12 clear, vel 20/0/100 for
-enabled/disabled/playhead) and treats the grid as a 16×8 page window over
-up to 96 Morphagene splices (MAX_SPLICES in the Lua script).
-
-This avoids SysEx and keeps bandwidth low while preserving state meaning.
-
-Features
-Fast full-frame LED updates using GridBuffer
-Dirty-flag rendering (no LED spam)
-Playhead flashing overlay
-Clean semantic state separation
-Designed for extensibility (paging, modes, probability layers)
-
-Scripts and responsibilities
-----------------------------
-
-- `Monome Grid Bridge.py`  
-  - Discovers the Grid via `serialosc` and connects to it with `pymonome`.  
-  - Discovers the Disting NT USB MIDI ports and connects with `mido`.  
-  - Converts Grid key events to MIDI notes for the NT.  
-  - Receives semantic MIDI from the NT and maintains a 16×8 framebuffer
-    (`GridState`) describing enabled steps, cursor, and playhead.  
-  - Periodically renders the framebuffer to the Grid using a `GridBuffer`.
-
-- `Morphagene L-System Splice Stepper 30.lua`  
-  - Implements a 96-splice L-system step sequencer for Morphagene.  
-  - OUT1: Morphagene ORGANIZE CV (0–5 V, bin-centered across splices).  
-  - OUT2: 5 V gate to Morphagene PLAY.  
-  - Maintains internal state: active splices, enabled list, cursor, playhead,
-    and current ORGANIZE voltage.  
-  - Emits semantic MIDI (CC/Note messages) to mirror its state to the Grid
-    via the Pi bridge.
-
-- `systemd/serialoscd.service`  
-  - User service that runs the Monome `serialoscd` daemon under the chosen
-    Linux user account and wires it to the journal for logging.
-
-- `systemd/monome-grid-bridge.service`  
-  - System service that starts the Python bridge after `serialoscd` is up,
-    with a small delay to let USB/OSC settle, and restarts on failure.
-
-Requirements
-------------
-- Raspberry Pi 5 (Raspberry Pi OS recommended)
-- Expert Sleepers Disting NT
-- Monome Grid 128
-- `serialosc` installed and running
-
-Raspberry Pi documentation
---------------------------
-Official setup and reference: [Raspberry Pi Documentation](https://www.raspberrypi.com/documentation/).
-
-- **First-time setup:** Use [Raspberry Pi Imager](https://www.raspberrypi.com/documentation/computers/getting-started.html#install-using-imager) to install Raspberry Pi OS (32 GB+ SD card recommended). You can enable SSH in Imager’s customisation for headless use.
-- **Raspberry Pi 5 power:** Use a 5 V/5 A USB‑C supply (e.g. [official 27 W](https://www.raspberrypi.com/documentation/computers/raspberry-pi.html#power-supply)); underpowered USB can cause issues with the grid and Disting NT.
-- **USB:** The Monome Grid and Disting NT connect over USB; no extra drivers are needed. If serialosc reports “Permission denied”, add your user to `dialout`/`uucp` (see step 3 below).
-
-Installation
-------------
-**Note:** On Raspberry Pi OS (Debian), `serialosc` is not in the default apt repositories. Install it by building from source as below. On Ubuntu you can use `sudo add-apt-repository ppa:artfwo/monome` then `apt install serialosc` instead.
-
-1. Install system packages and build dependencies
-```bash
-sudo apt update
-sudo apt install -y python3-pip git \
-  liblo-dev libudev-dev \
-  libavahi-compat-libdnssd-dev libuv1-dev
-```
-
-2. Build and install serialosc (required for Monome Grid)
-```bash
-# libmonome (dependency)
-git clone https://github.com/monome/libmonome.git
-cd libmonome
-./waf configure
-./waf
-sudo ./waf install
-cd ..
-
-# serialosc
-git clone https://github.com/monome/serialosc.git --recursive
-cd serialosc
-./waf configure
-./waf
-sudo ./waf install
-cd ..
-
-sudo ldconfig
-```
-
-3. (Optional) USB access for the grid — if you get "Permission denied" when running serialosc:
-```bash
-sudo gpasswd -a $USER uucp
-sudo gpasswd -a $USER dialout
-```
-Then log out and back in.
-
-4. Install Python dependencies
-```bash
-cd /path/to/Disting-NT-to-Monome-Grid-Bridge
-python3 -m pip install --upgrade pip
-python3 -m pip install -r requirements.txt
-```
-
-Running
--------
-Connect:
-
-- Disting NT via USB
-- Monome Grid via USB
-
-Start the serialosc daemon (in a terminal or before the bridge):
 ```bash
 serialoscd
-```
-
-Then run the bridge:
-```bash
 python3 "Monome Grid Bridge.py"
 ```
 
-Start at boot (systemd)
------------------------
-To have serialosc and the bridge start automatically on boot (recommended on Raspberry Pi):
+## Start at boot
 
-1. Copy the service files into systemd (run from the project directory):
 ```bash
-cd /home/admin/Disting-NT-to-Monome-Grid-Bridge
 sudo cp systemd/serialoscd.service systemd/monome-grid-bridge.service /etc/systemd/system/
-```
-
-2. Reload systemd, enable both services, and start them:
-```bash
 sudo systemctl daemon-reload
 sudo systemctl enable serialoscd.service monome-grid-bridge.service
 sudo systemctl start serialoscd.service monome-grid-bridge.service
 ```
 
-3. Check status:
-```bash
-sudo systemctl status serialoscd.service
-sudo systemctl status monome-grid-bridge.service
-```
+If not user `admin`, edit `.service` files for `User=` and paths. Port 12002 must be free for serialosc.
 
-- **serialosc** starts first; the **bridge** starts after a short delay so the grid can be discovered.
-- Logs: `journalctl -u serialoscd.service -f` and `journalctl -u monome-grid-bridge.service -f`.
-- To stop auto-start: `sudo systemctl disable serialoscd.service monome-grid-bridge.service`.
-- **Port 12002:** serialosc uses UDP port 12002. If the service fails with exit code 255, the port is likely in use (e.g. another serialoscd). Run only the systemd service, or only a manual `serialoscd`—not both. To free the port: `sudo systemctl stop serialoscd.service` and `pkill -x serialoscd`, then start the service again.
+## Mapping
 
-If your username is not `admin`, edit both `.service` files and change `User=admin` to your user, and update the paths in `monome-grid-bridge.service` to match your home directory before copying to `/etc/systemd/system/`.
-
-You should see:
-
-```text
-[MIDI] Connected IN : ...
-[MIDI] Connected OUT: ...
-[GRID] Connected to device ...
-Running. Grid key → NT notes. NT semantic MIDI → grid LEDs.
-```
-
-Mapping model
--------------
-
-Index mapping is 1:1 across the system:
-
-- `index = y * 16 + x`  
-- Grid `(x, y)`  
-- MIDI note number  
-- NT internal step index  
-- Framebuffer index
-
-Brightness semantics (Grid 0–15)
---------------------------------
-
-| Level | Meaning                          |
-|-------|----------------------------------|
-| 0     | Off (beyond splice count)        |
-| 4     | Dim (within splice count)       |
-| 12    | Cursor                           |
-| 15    | Playhead (bright or blinking)     |
-
-Splice count (CC13) and page (CC11) from the NT define how many LEDs are dim:
-exactly that many positions on the current page are lit dim; the currently
-playing splice is highlighted (bright or blinking). Overlay priority:
-`Playhead > Cursor > Dim (splice count) > Off`.
-
-Extending the system
---------------------
-
-Planned / easy extensions:
-
-- Paging for >128 NT steps
-- Probability visualization via brightness scaling
-- Multiple UI modes (edit/play)
-- MIDI clock sync
-- Bidirectional state refresh
-- Robust hot-reconnect handling
-
+Grid index `i = y*16 + x` (0–127). Page P maps to absolute splice `(P-1)*128 + i + 1`. Only indices 1..splice_count are dim; playhead overlay only if in range.

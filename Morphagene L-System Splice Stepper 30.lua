@@ -198,9 +198,10 @@ local function sendPlayheadClear(self)
 end
 
 -- Tell grid bridge how many splices exist so it can show that many dim LEDs (CC13).
+-- Value 0 means no valid splices; grid shows no dim LEDs.
 local function sendSpliceCount(self)
     local ch = midiChannel(self)
-    sendCC(ch, 13, clamp(mg.nSplices, 1, 127))
+    sendCC(ch, 13, clamp(mg.nSplices, 0, 127))
 end
 
 local function sendFullPageState(self)
@@ -223,7 +224,7 @@ end
 local function recomputeAndClampParams(self)
     -- Guard: host may not provide parameters in some contexts (e.g. early draw).
     if not self or not self.parameters then return end
-    mg.nSplices = clamp(self.parameters[1], 1, MAX_SPLICES)
+    mg.nSplices = clamp(self.parameters[1], 0, MAX_SPLICES)
 
     local maxPage = pageCountForN(mg.nSplices)
     local p = clamp(self.parameters[3], 1, maxPage)
@@ -421,14 +422,14 @@ return {
             outputNames = { "Organize CV", "Play Pulse" },
 
             parameters = {
-                { "Splices", 1, MAX_SPLICES, 20, kInt },
+                { "Splices", 0, MAX_SPLICES, 20, kInt },
                 { "Pulse ms", 1, 1000, 20, kMs },
                 { "Page", 1, pageCountForN(MAX_SPLICES), 1, kInt },
                 { "MIDI ch", 1, 16, 1, kInt },
             },
 
-            -- Receive grid key presses from Monome Grid Bridge (USB MIDI Note On).
-            midi = { channelParameter = 4, messages = { "note" } },
+            -- Receive grid / bridge messages (currently only CC127 for state request).
+            midi = { channelParameter = 4, messages = { "note", "cc" } },
         }
     end,
 
@@ -480,9 +481,27 @@ return {
     -- version, they do not alter playback order (which is always 1..nSplices);
     -- they are reserved for future extensions and currently ignored.
     midiMessage = function(self, msg)
-        local status, note, vel = msg[1], msg[2], msg[3]
-        -- Note On: status 0x90..0x9F, velocity > 0. Ignored for now.
-        if not status or status < 0x90 or status > 0x9F or not vel or vel == 0 then
+        local status, data1, data2 = msg[1], msg[2], msg[3]
+        if not status then return end
+
+        -- Note On from the grid is currently ignored in deterministic mode.
+        if status >= 0x90 and status <= 0x9F then
+            return
+        end
+
+        -- Control Change: allow the bridge to request a full state dump with CC127.
+        if status >= 0xB0 and status <= 0xBF then
+            local cc = data1 or 0
+            if cc == 127 then
+                -- Refresh params so the snapshot is current, then respond.
+                recomputeAndClampParams(self)
+                sendSpliceCount(self)
+                if mg.pos ~= 0 and mg.pos >= 1 and mg.pos <= mg.nSplices then
+                    sendPlayhead(self, mg.pos)
+                else
+                    sendPlayheadClear(self)
+                end
+            end
             return
         end
     end,
@@ -547,7 +566,7 @@ return {
 
     encoder3Turn = function(self, dir)
         if not self or not self.parameters then return end
-        local n = clamp(self.parameters[1] + (dir or 0), 1, MAX_SPLICES)
+        local n = clamp(self.parameters[1] + (dir or 0), 0, MAX_SPLICES)
         setParameter(self.algorithmIndex, self.parameterOffset + 1, n, true)
 
         recomputeAndClampParams(self)
