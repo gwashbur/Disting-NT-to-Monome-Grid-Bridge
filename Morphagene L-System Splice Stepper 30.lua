@@ -153,6 +153,8 @@ local function sendCC(ch, cc, val)
 end
 
 local function midiChannel(self)
+    -- Guard: host may not provide parameters in some contexts (e.g. early draw).
+    if not self or not self.parameters then return 1 end
     return self.parameters[4]
 end
 
@@ -206,10 +208,7 @@ local function sendFullPageState(self)
     sendSpliceCount(self)
     sendCursor(self)
 
-    local s, e = currentPageRange()
-    for i = s, e do
-        sendEnableStateForAbs(self, i)
-    end
+    -- Deterministic mode: no per-step enable state; grid dim count comes from CC13 only.
 
     if mg.pos ~= 0 and mg.pos >= 1 and mg.pos <= mg.nSplices then
         -- Active playhead within the valid splice range.
@@ -222,6 +221,8 @@ local function sendFullPageState(self)
 end
 
 local function recomputeAndClampParams(self)
+    -- Guard: host may not provide parameters in some contexts (e.g. early draw).
+    if not self or not self.parameters then return end
     mg.nSplices = clamp(self.parameters[1], 1, MAX_SPLICES)
 
     local maxPage = pageCountForN(mg.nSplices)
@@ -337,17 +338,9 @@ local function updateCellStates()
         mg.cellState[i] = STATE_ENABLED
     end
 
-    -- Cursor overlay.
-    -- The cursor should NOT falsely imply that a splice is enabled. To make the
-    -- distinction clear we use two different visual states:
-    --   - STATE_SELECTED_ON:  cursor on an enabled splice,
-    --   - STATE_SELECTED_OFF: cursor on a disabled splice.
+    -- Cursor overlay. Deterministic mode: all splices in 1..nSplices are valid, so show selected as ON.
     if mg.cursorIndex >= 1 and mg.cursorIndex <= mg.nSplices then
-        if mg.active[mg.cursorIndex] then
-            mg.cellState[mg.cursorIndex] = STATE_SELECTED_ON
-        else
-            mg.cellState[mg.cursorIndex] = STATE_SELECTED_OFF
-        end
+        mg.cellState[mg.cursorIndex] = STATE_SELECTED_ON
     end
 
     -- Playhead (current splice index if playing)
@@ -553,6 +546,7 @@ return {
     end,
 
     encoder3Turn = function(self, dir)
+        if not self or not self.parameters then return end
         local n = clamp(self.parameters[1] + (dir or 0), 1, MAX_SPLICES)
         setParameter(self.algorithmIndex, self.parameterOffset + 1, n, true)
 
@@ -562,21 +556,13 @@ return {
             mg.cursorIndex = mg.nSplices
         end
 
-        -- Changing the total number of splices should rebuild the enabled list
-        -- and keep the playhead on a valid active splice (or stop if none).
-        ensureValidPlayhead(self)
-        -- So the grid shows the correct number of dim LEDs, send splice count.
+        resolve_current_splice_after_count_change(self)
         sendSpliceCount(self)
     end,
 
     button1Push = function(self)
+        -- Deterministic mode: no per-step enable/disable; button 1 is reserved for future use.
         recomputeAndClampParams(self)
-
-        local i = clamp(mg.cursorIndex, 1, mg.nSplices)
-        mg.active[i] = not mg.active[i]
-        sendEnableStateForAbs(self, i)
-        -- Button edits share the same rules as grid edits.
-        ensureValidPlayhead(self)
     end,
 
     button2Push = function(self)
@@ -621,6 +607,7 @@ return {
             sendFullPageState(self)
         end
 
+        local s, e = currentPageRange()
         local maxPage = pageCountForN(mg.nSplices)
 
         -- Header
@@ -629,7 +616,7 @@ return {
         local playSplice = (mg.pos ~= 0) and mg.pos or 0
         drawText(2, 11, "Play=" .. playSplice .. "  CV=" .. string.format("%.3f", mg.cachedCV))
 
-        -- 16x8 fixed page grid
+        -- 16x8 fixed page grid (only draw cells on current page and within splice count)
         local ox = 0
         local oy = 18
         local boxW = 16
@@ -646,7 +633,7 @@ return {
             local x2 = x1 + boxW - 2
             local y2 = y1 + boxH - 2
 
-            if absIndex <= e then
+            if absIndex >= s and absIndex <= e and absIndex <= mg.nSplices then
                 local state = mg.cellState[absIndex]
                 renderCellState(state, x1, y1, x2, y2)
             end
